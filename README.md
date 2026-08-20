@@ -2,11 +2,15 @@
 
 ![gif of aiq in the terminal](/aiq.gif)
 
-`aiq` is a no-frills CLI for embeddings and text classification, inspired by the power of `jq`. It does 4 things:
+`aiq` is a no-frills CLI for embeddings and text classification, inspired by the power of `jq`. It does 5 things:
 - `aiq label`: Use LLM APIs to label a stream of texts
+- `aiq extract`: Use LLM APIs to pull several fields out of each text at once, shaped by a JSON Schema
 - `aiq embed`: Compute embeddings on a stream of texts
 - `aiq train`: Train a text classifier (linear model) on a stream of embedded texts with labels
 - `aiq classify`: Classify a stream of unlabeled text embeddings
+
+Every command emits exactly one record per input record, so a downstream
+command (or you) can always join the results back to their inputs.
 
 These commands can operate on text and JSONL files, but they can also **read from stdin.** This means that you can chain them together: for example, you can use a single command to stream a text file in to be labeled, pipe the labeled data through an embedding model, and finally pipe the embedded, labeled training data through classifier training. (See the Quickstart to learn how!)
 
@@ -44,6 +48,65 @@ echo '{"text": "Maple-bacon and blueberry muffins"}' | aiq embed | aiq classify 
 ```
 
 You'll also get a warning about loading the model, which is a reminder that it's not safe to load `aiq` models from untrusted sources. You can disable this warning by setting the `--no-warn` flag for `aiq classify`.
+
+## Extract several fields at once
+
+`aiq label` answers one question and caps the reply at a few tokens. When you
+need more from the same text -- a boolean, a category, a summary -- use
+`aiq extract` and describe the output with a JSON Schema:
+
+```json
+{"type": "object",
+ "properties": {"is_disaster": {"type": "boolean"},
+                "category":    {"type": "string"},
+                "topic":       {"type": "string"}},
+ "required": ["is_disaster", "category", "topic"]}
+```
+
+```bash
+cat segments.jsonl | aiq extract \
+  --schema-file disaster.json --instruction-file disaster.txt \
+  --input-type json --input-field text \
+  --model my-model --api-base-url http://localhost:8080/v1
+```
+
+```json
+{"seg": "a", "text": "...", "is_disaster": true, "category": "earthquake", "topic": "..."}
+```
+
+The schema is sent as `response_format: json_schema`, which constrains the
+decoder instead of asking the model politely. For endpoints without that
+support, pass `--response-format prompt` and the schema goes into the message
+body instead. The switch is never made silently.
+
+Keeping the shape in a file rather than in code means one command can serve
+unrelated tasks with no new Python. Extracted fields are merged into the
+record; if that would overwrite an existing field it is an error, and
+`--output-field` nests the result under a single key instead.
+
+## Screen cheaply, then spend on an LLM
+
+`aiq classify --score-field` puts a number in the record, so the decision of
+what deserves an LLM call can be made by the next command in the pipe rather
+than inside a bespoke script:
+
+```bash
+cat segments.jsonl \
+  | aiq embed --input-field text \
+  | aiq classify --model-path screen.joblib --score-field score --score-label yes \
+  | tee screened.jsonl \
+  | jq -c 'select(.score >= 0.05)' \
+  | aiq extract --schema-file disaster.json --instruction-file disaster.txt \
+      --input-type json --input-field text --model my-model
+```
+
+`--score-label` picks which class is scored; without it you get the
+probability of whichever class won, which is not what a threshold usually
+means. Scores come from `predict_proba`. A model that only has
+`decision_function` (including the one `aiq train` builds) still works, but
+the value is an unbounded margin rather than a probability, so a 0..1
+threshold does not apply -- `aiq` says so on stderr rather than substituting
+one for the other quietly.
 
 ## Examples
 
@@ -203,6 +266,18 @@ Flags:
 - **No shared global state.** Nothing is written to a fixed path such as `/tmp/aiq.status`, so any number of `aiq` pipelines can run concurrently on the same machine without interfering. The only cross-command value, the progress total, is passed explicitly via `--input-size` or `AIQ_INPUT_SIZE`.
 - **Invalid arguments fail loudly.** Values for constrained flags such as `--input-type` are validated, so a typo like `--input-type jsonl` is an error instead of silently falling back to a different mode.
 - **Pipes that close early are not an error.** `aiq ... | head -3` stops quietly with exit status 141 instead of printing a traceback.
+
+## Running the tests
+
+Dependencies are pinned in `uv.lock`, and the suite shells out to
+`python -m aiq.aiq`, so it has to run inside the project environment:
+
+```bash
+uv run --frozen python -m pytest tests/ -q
+```
+
+Nothing in the suite reaches the network: the OpenAI client is replaced with a
+fake, and the embedding and classifier paths run locally.
 
 ## Use from Python
 This tool is written in Python, and it works fine as a Python library. You can import the `label`, `embed`, `train`, and `classify` functions from `aiq` and use them directly.
