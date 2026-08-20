@@ -166,7 +166,9 @@ Flags:
 - `--label_field`, `-l`: The field in the JSON objects to use as the label. This should be a string field, and it defaults to "label", the default output of `aiq label`.
 - `--input_field`, `-i`: The field in the JSON objects (which should be the embedding, a list of floats) to use as the input. Defaults to "embedding", the default output field of `aiq embed`.
 - `--batch_size`, `-b`: The batch size to use for training. Defaults to 32.
-- `--test_size`, `-t`: The proportion of the data to use for estimating out-of-sample accuracy. Defaults to 0.1.
+- `--test_size`, `-t`: The proportion of the data to use for estimating out-of-sample accuracy. Defaults to 0.1. The split is a deterministic hash of each line, so with a small input it can produce no held-out example at all; increase it (e.g. `0.25`) for a few dozen records.
+- `--timeout`: How long to wait for more input, in seconds, before deciding the stream is finished. Defaults to 10. Raise it when the upstream command is slow, e.g. `aiq label` against a slow LLM.
+- `--input_size`: Total number of input records, used only for the "step n / total" progress display on stderr. Can also be given as the `AIQ_INPUT_SIZE` environment variable.
 
 ### `aiq classify`
 Classify a stream of JSON objects using their embeddings. Uses the model from `aiq train`.
@@ -178,6 +180,15 @@ Flags:
 - `--remove_input`, `-r`: If this flag is set, remove the input (i.e. embedding) field from the output JSON. Embeddings can get really large and take up a lot of space, and you might not need it in the final result. Enabled by default.
 - `--skip_errors`, `-s`: If true, skip over any errors that occur while embedding--inputs that cause errors will just not appear in the output. Otherwise, raise an exception. Defaults to `false`.
 - `--no-warn`: If set, do not show the error about loading models from untrusted sources.
+- `--input_size`: Total number of input records, used only for the "n / total" progress display on stderr. Can also be given as the `AIQ_INPUT_SIZE` environment variable.
+
+## Behavior in scripts, CI, and agents
+`aiq` is designed to be driven by other programs as well as by humans:
+
+- **stdout is always plain.** Records are written straight to stdout without going through `rich`, so `FORCE_COLOR`/`CLICOLOR_FORCE` (commonly set in CI and agent runtimes) cannot inject ANSI escapes into the JSON stream. All human-facing output — warnings, spinners, progress — goes to stderr, and stays coloured there.
+- **No shared global state.** Nothing is written to a fixed path such as `/tmp/aiq.status`, so any number of `aiq` pipelines can run concurrently on the same machine without interfering. The only cross-command value, the progress total, is passed explicitly via `--input-size` or `AIQ_INPUT_SIZE`.
+- **Invalid arguments fail loudly.** Values for constrained flags such as `--input-type` are validated, so a typo like `--input-type jsonl` is an error instead of silently falling back to a different mode.
+- **Pipes that close early are not an error.** `aiq ... | head -3` stops quietly with exit status 141 instead of printing a traceback.
 
 ## Use from Python
 This tool is written in Python, and it works fine as a Python library. You can import the `label`, `embed`, `train`, and `classify` functions from `aiq` and use them directly.

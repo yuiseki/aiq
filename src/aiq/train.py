@@ -1,18 +1,15 @@
-import os
 import sys
 import fire
 import time
 import json
-import itertools
 import numpy as np
 from sklearn.linear_model import PassiveAggressiveClassifier
 import hashlib
 import joblib
 from rich.console import Console
-from rich.status import Status
 from rich.style import Style
 import select
-from .common import get_shared_status
+from .common import SafeStatus as Status, get_input_size
 
 # deterministic way to split into train and test that won't vary between runs / batch sizes
 def is_test(line, test_size):
@@ -32,7 +29,8 @@ def train(
     input_field: str = "embedding",
     batch_size: int = 32,
     test_size: float = 0.1,
-    timeout: float = 10.0
+    timeout: float = 10.0,
+    input_size: int | None = None,  # total records, only used for the progress display
 ):
     corrected_batch_size = int(batch_size * (1 / (1 - test_size)))
     model = PassiveAggressiveClassifier(average=True)
@@ -43,7 +41,6 @@ def train(
     X_train: np.ndarray | None = None
     y_train: np.ndarray | None = None
     console = Console(file=sys.stderr)
-    stdout = Console(file=sys.stdout)
 
     # iterate over batches of lines from stdin
     status = Status("Starting training...", console=console, spinner_style=Style(color="magenta"))
@@ -91,14 +88,18 @@ def train(
                 model.partial_fit(X_train_subset, y_train_subset, classes=list(range(n_classes)))
                 i += 1
                 # print validation accuracy
-                get_shared_status()
-                input_size = os.environ.get("AIQ_INPUT_SIZE", None)
-                if input_size is not None:
-                    total_steps = int(input_size) // corrected_batch_size
+                total = get_input_size(input_size)
+                if total is not None:
+                    total_steps = total // corrected_batch_size
                 else:
                     total_steps = "???"
-                accuracy = model.score(X_test, y_test)
-                status.update(f"[bold]Training Step:[/bold] {i:>3}/{total_steps} | [bold]Test Accuracy = [green]{accuracy:.3f}[/green][/bold]")
+                # a batch can legitimately contain no held-out example yet;
+                # scoring an empty test set used to crash the whole run
+                if X_test is not None and len(X_test) > 0:
+                    accuracy = f"{model.score(X_test, y_test):.3f}"
+                else:
+                    accuracy = "n/a"
+                status.update(f"[bold]Training Step:[/bold] {i:>3}/{total_steps} | [bold]Test Accuracy = [green]{accuracy}[/green][/bold]")
 
                 batch = []
 
@@ -106,7 +107,11 @@ def train(
                 break  # End of epoch or input
 
     # evaluate the model
-    assert X_test is not None, "No test data provided"
+    if X_test is None or len(X_test) == 0:
+        raise RuntimeError(
+            "No held-out examples were produced; increase --test-size or "
+            "provide more input records."
+        )
     print(f"Evaluating on {len(X_test)} held-out examples...")
     preds = model.predict(X_test)
     # print([(pred, gold) for pred, gold in zip(preds, y_test)])

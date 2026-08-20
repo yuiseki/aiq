@@ -1,12 +1,10 @@
-import os
 import sys
 import select
 import json
 from rich.console import Console
-from rich.status import Status
 import time
 import joblib
-from .common import get_shared_status
+from .common import SafeStatus as Status, get_input_size, write_stdout
 
 def classify(
     model_path: str,
@@ -14,10 +12,10 @@ def classify(
     input_field: str = "embedding",
     remove_input: bool = True,
     skip_errors: bool = False,
-    no_warn: bool = False
+    no_warn: bool = False,
+    input_size: int | None = None,  # total records, only used for the progress display
 ):
     console = Console(file=sys.stderr)
-    stdout = Console(file=sys.stdout)
     if not no_warn:
         console.print("[yellow]⚠️  Warning: Loading models uses pickle, which can execute arbitrary Python code. " +
             "If you don't trust the source of this model file, press CTRL + C to exit.[/yellow]")
@@ -62,15 +60,11 @@ def classify(
             loaded[label_field] = label
             if remove_input:
                 del loaded[input_field]
-            stdout.print(json.dumps(loaded), markup=False)
+            write_stdout(json.dumps(loaded))
             examples_read += 1
 
-            get_shared_status()
-            input_size = os.environ.get("AIQ_INPUT_SIZE", None)
-            if input_size is not None:
-                total_steps = int(input_size)
-            else:
-                total_steps = "???"
+            total = get_input_size(input_size)
+            total_steps = total if total is not None else "???"
             status.update(f"Classified {examples_read} / {total_steps} examples...")
 
     console.print("Done.")

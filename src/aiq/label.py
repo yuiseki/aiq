@@ -6,10 +6,9 @@ import yaml
 import asyncio
 import pandas as pd
 from typing import Optional, Literal
-from aiq.common import set_shared_status, count_lines
+from aiq.common import SafeStatus as Status, write_stdout, validate_choice
 from openai import AsyncOpenAI
 from rich.console import Console
-from rich.status import Status
 from rich.style import Style
 import contextlib
 
@@ -80,6 +79,7 @@ def label(
     skip_errors: bool = False,
     progress: bool = False # Do not turn on if piping to another process; they'll interfere
 ):
+    validate_choice("input_type", input_type, ["json", "text"])
     if input_type == "json" and input_field is None:
         raise ValueError("input_type is 'json' but input_field is not provided")
     if input_type == "text" and input_field is not None:
@@ -96,7 +96,6 @@ def label(
     else:
         raise ValueError("label_options must be a list or dict")
     console = Console(file=sys.stderr)
-    stdout = Console(file=sys.stdout)
     examples_read = 0
 
     # Initialize the asynchronous OpenAI client
@@ -109,9 +108,6 @@ def label(
     if file is None:
         file_handle = sys.stdin
     else:
-        # count lines in file
-        total_lines = count_lines(file)
-        set_shared_status("AIQ_INPUT_SIZE", str(total_lines))
         file_handle = open(file, "r")
 
     async def async_label():
@@ -138,7 +134,7 @@ def label(
                     **input_json,
                     output_field: label_result
                 }
-                stdout.print(json.dumps(output_json), markup=False, soft_wrap=True)
+                write_stdout(json.dumps(output_json))
                 examples_read += 1
                 if progress and status is not None:
                     status.update(f"Labeled {examples_read} examples...")
@@ -151,7 +147,6 @@ def label(
             "", console=console, spinner_style=Style(color="purple")
         ) if progress else contextlib.nullcontext()
 
-        total_lines = 0
         with status_context as status:
             # Iterate over each line and schedule tasks
             for line in file_handle:
@@ -168,9 +163,6 @@ def label(
                 if progress and status is not None:
                     status.update(f"Processing {len(tasks)} examples...")
                 await asyncio.gather(*tasks)
-
-        # update env variable
-        set_shared_status("AIQ_INPUT_SIZE", str(total_lines))
 
     # Run the asynchronous helper function
     asyncio.run(async_label())
