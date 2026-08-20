@@ -1,12 +1,7 @@
 import sys
-import select
-from abc import ABC, abstractmethod
-from typing import Literal, Union, Optional
+from typing import Literal, Optional
 import json
 import numpy as np
-import onnxruntime as ort
-from huggingface_hub import hf_hub_download
-from transformers import AutoTokenizer
 import rich
 from rich.console import Console
 import contextlib
@@ -18,6 +13,7 @@ def embed(
     input_field: str | None = "text",
     output_field: str = "embedding",
     model_name: str = "snowflake-xs",
+    batch_size: int = 64,
     skip_errors: bool = False,
     progress: bool = False, # do not turn on if piping to another process, they'll interfere
     file: Optional[str] = None
@@ -30,18 +26,44 @@ def embed(
         raise ValueError("input_type is 'json' but input_field is not provided")
     if input_type == "text" and input_field is not None:
         console.print("\n[yellow]Warning: input_type is 'text' but input_field is provided. Ignoring input_field.[/yellow]\n")
+    batch_size = int(batch_size)
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     model = EmbeddingModel.from_registry(model_name)
     examples_read = 0
-    # with Status("", console=console) if  as status:
-    # if show progress, then use status otherwise contextlib.nullcontext
+
     if file is None:
         file_handle = sys.stdin
     else:
         file_handle = open(file, "r")
 
+    def flush(batch: list[tuple[dict, str]]) -> None:
+        """Embed one batch and write the records out in input order."""
+        nonlocal examples_read
+        if not batch:
+            return
+        try:
+            # `encode` takes a list, so one call per batch replaces what used
+            # to be one call per record
+            vectors = model.encode([text for _, text in batch], show_progress=False)
+        except Exception as e:
+            if skip_errors:
+                return
+            raise RuntimeError(
+                f"Error embedding batch of {len(batch)} records with "
+                f"{model_name}: {str(e)}"
+            ) from e
+        for (input_json, _), vector in zip(batch, vectors):
+            write_stdout(json.dumps({
+                **input_json,
+                output_field: np.asarray(vector).tolist()
+            }))
+            examples_read += 1
+
     with (
         Status("", console=console, spinner_style=rich.style.Style(color="purple")) if progress else contextlib.nullcontext()
     ) as status:
+        batch: list[tuple[dict, str]] = []
         for line in file_handle:
             if not line:
                 # End of file reached
@@ -57,14 +79,20 @@ def embed(
                     # skip this record; `return` here used to abort the whole
                     # stream and silently truncate the output
                     continue
-                embedding = model.encode([input_text], show_progress=False)[0]
-                write_stdout(json.dumps({
-                    **input_json,
-                    output_field: embedding.tolist()
-                }))
-                examples_read += 1
-                if progress and status is not None:
-                    status.update(f"Embedded {examples_read} examples...")
+                batch.append((input_json, input_text))
             except Exception as e:
                 if not skip_errors:
                     raise RuntimeError(f"Error processing line: {line}. Error: {str(e)}") from e
+                continue
+            if len(batch) >= batch_size:
+                # only ever one batch in memory: this stays a stream
+                flush(batch)
+                batch = []
+                if progress and status is not None:
+                    status.update(f"Embedded {examples_read} examples...")
+        flush(batch)
+        if progress and status is not None:
+            status.update(f"Embedded {examples_read} examples...")
+
+    if file is not None:
+        file_handle.close()
