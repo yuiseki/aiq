@@ -151,10 +151,24 @@ Flags:
 - `--input_type`: Whether the input is a stream of texts ("text"), or JSON objects ("json"). By default, it's "json", which makes it compatible with the output of `aiq label`.
 - `--input_field`: If `input_type` is "json", the field to embed. Ignored for text input.
 - `--output_field`, `-o`: The field in the JSON objects to write the embeddings to. Defaults to `embedding`.
-- `--model_name`, `-m`: The name of the embedding model to use. Uses `snowflake-xs` by default, supports all models in the [`onnx_embedding_models`](https://github.com/taylorai/onnx_embedding_models) package.
+- `--model_name`, `-m`: The name of the embedding model to run locally. Uses `snowflake-xs` by default, supports all models in the [`onnx_embedding_models`](https://github.com/taylorai/onnx_embedding_models) package. Ignored when an HTTP endpoint is used (see `--api_base_url`).
+- `--model`: The model name to ask an OpenAI-compatible embeddings endpoint for. Passing this (or `--api_base_url`) switches `embed` from the local ONNX model to the HTTP endpoint. It is required for the HTTP route, so that the embeddings cannot silently come from a different model than you think.
+- `--api_base_url`: The base URL of an OpenAI-compatible embeddings endpoint, e.g. `http://127.0.0.1:30190/v1` for a local llama.cpp/vLLM/TEI server. Lets `embed` reuse an embedding server that is already running instead of downloading and running a model itself. Falls back to the `OPENAI_BASE_URL` environment variable, but only once `--model` or `--api_base_url` has selected the HTTP route: having `OPENAI_BASE_URL` exported for `aiq label` never changes the default (local) behaviour.
+- `--api_key`: API key for the endpoint. Falls back to `OPENAI_API_KEY`, and to a placeholder, since local servers usually ignore it.
+- `--batch_size`, `-b`: How many texts to embed per call. Defaults to 64. Both routes send a whole batch in one call (`model.encode(texts)` locally, one request per batch over HTTP), which is where nearly all of the speedup comes from: on an HTTP endpoint the round-trip cost is amortised over the batch. Only one batch is ever held in memory, so `embed` is still a stream.
 - `--skip_errors`, `-s`: If true, skip over any errors that occur while embedding--inputs that cause errors will just not appear in the output. Otherwise, raise an exception. Defaults to `false`.
 - `--progress`, `-p`: If true, will show progress in the console. Defaults to `false`, as the progress from embeddings can interfere with other progress bars and `embed` is designed to be chained.
 - `--file`, `-f`: If provided, will read from the file instead of stdin. Supports `.jsonl` and `.txt`.
+
+Records with an empty text field are skipped; the rest of the stream is still embedded. The dimension of the first batch is printed on stderr along with the model name, e.g. `granite-embedding: 384-dimensional embeddings (batch size 64)`, so a model mix-up is visible before the embeddings reach `aiq train`. If a later batch comes back with a different dimension, `embed` errors out.
+
+Using an embedding server that is already running, instead of a local model:
+
+```bash
+cat data.jsonl |
+aiq embed --api-base-url http://127.0.0.1:30190/v1 --model granite-embedding |
+aiq train --model_path model.joblib --n-classes 2
+```
 
 
 ### `aiq train`
