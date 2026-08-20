@@ -97,6 +97,7 @@ def embed(
         embedder = LocalEmbedder(model_name)
 
     examples_read = 0
+    reported_dim: int | None = None
 
     if file is None:
         file_handle = sys.stdin
@@ -105,7 +106,7 @@ def embed(
 
     def flush(batch: list[tuple[dict, str]]) -> None:
         """Embed one batch and write it out in input order."""
-        nonlocal examples_read
+        nonlocal examples_read, reported_dim
         if not batch:
             return
         try:
@@ -118,6 +119,22 @@ def embed(
                 f"{embedder.name}: {str(e)}"
             ) from e
         for (input_json, _), vector in zip(batch, vectors):
+            dim = len(vector)
+            if reported_dim is None:
+                reported_dim = dim
+                # a mismatch between this and what `aiq train` was trained on
+                # is otherwise only visible as a confusing failure later
+                console.print(
+                    f"[dim]{embedder.name}: {dim}-dimensional embeddings "
+                    f"(batch size {batch_size})[/dim]"
+                )
+            elif dim != reported_dim:
+                if skip_errors:
+                    continue
+                raise RuntimeError(
+                    f"Inconsistent embedding dimension from {embedder.name}: "
+                    f"got {dim}, expected {reported_dim}"
+                )
             write_stdout(json.dumps({
                 **input_json,
                 output_field: vector
