@@ -126,6 +126,11 @@ def label(
                     input_json = {"text": line}
                     input_text = line
                 if not input_text:
+                    # One record in, one record out. Dropping the ones that
+                    # cannot be labelled would silently break the caller's
+                    # ability to join results back to their inputs.
+                    write_stdout(json.dumps({**input_json, output_field: None}))
+                    examples_read += 1
                     return
                 label_result = await get_label(
                     input_text, label_options_dict, client, model
